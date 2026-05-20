@@ -36,9 +36,6 @@ import {
   resolveBootstrapContextForRun,
   setActiveEmbeddedRun,
   supportsModelTools,
-  hasSandboxBindContainerPathAliases,
-  hasSandboxBindReadonlyHostShadows,
-  resolveWritableSandboxBindHostRoots,
   runAgentCleanupStep,
   type AgentMessage,
   type EmbeddedRunAttemptParams,
@@ -128,7 +125,6 @@ import {
 import {
   type CodexUserInput,
   isJsonObject,
-  type CodexSandboxPolicy,
   type CodexServerNotification,
   type CodexDynamicToolSpec,
   type CodexDynamicToolCallParams,
@@ -465,39 +461,6 @@ function toCodexTextInput(text: string): CodexUserInput {
 
 type OpenClawSandboxContext = Awaited<ReturnType<typeof resolveSandboxContext>>;
 
-function resolveCodexAppServerSandboxPolicyForOpenClawSandbox(
-  appServer: CodexAppServerRuntimeOptions,
-  sandbox: OpenClawSandboxContext,
-  cwd: string,
-): CodexSandboxPolicy | undefined {
-  if (!sandbox?.enabled || appServer.sandbox === "read-only") {
-    return undefined;
-  }
-  const networkAccess = codexNetworkAccessForOpenClawSandbox(sandbox);
-  const writableRoots = new Set([cwd]);
-  if (sandbox.backendId === "docker") {
-    for (const root of resolveWritableSandboxBindHostRoots(sandbox.docker.binds)) {
-      writableRoots.add(root);
-    }
-  }
-  // Codex app-server still runs on the Gateway host, so keep Codex's
-  // filesystem sandbox while mirroring the OpenClaw sandbox egress policy.
-  return {
-    type: "workspaceWrite",
-    writableRoots: [...writableRoots],
-    networkAccess,
-    excludeTmpdirEnvVar: false,
-    excludeSlashTmp: false,
-  };
-}
-
-function codexNetworkAccessForOpenClawSandbox(sandbox: OpenClawSandboxContext): boolean {
-  if (!sandbox?.enabled || sandbox.backendId !== "docker") {
-    return true;
-  }
-  return sandbox.docker.network.trim().toLowerCase() !== "none";
-}
-
 function resolveCodexAppServerForOpenClawToolPolicy(params: {
   appServer: CodexAppServerRuntimeOptions;
   pluginConfig: CodexPluginConfig;
@@ -819,11 +782,6 @@ export async function runCodexAppServerAttempt(
       : sandbox.workspaceDir
     : resolvedWorkspace;
   await fs.mkdir(effectiveWorkspace, { recursive: true });
-  const codexSandboxPolicy = resolveCodexAppServerSandboxPolicyForOpenClawSandbox(
-    configuredAppServer,
-    sandbox,
-    effectiveWorkspace,
-  );
   const appServer = resolveCodexAppServerForOpenClawToolPolicy({
     appServer: configuredAppServer,
     pluginConfig,
@@ -1111,7 +1069,9 @@ export async function runCodexAppServerAttempt(
   };
   if (activeContextEngine) {
     try {
-      await applyActiveContextEngineProjection(startupBinding);
+      await applyActiveContextEngineProjection(
+        nativeToolSurfaceEnabled === false ? undefined : startupBinding,
+      );
     } catch (assembleErr) {
       embeddedAgentLog.warn("context engine assemble failed; using Codex baseline prompt", {
         error: formatErrorMessage(assembleErr),
@@ -1122,6 +1082,7 @@ export async function runCodexAppServerAttempt(
       startupBinding,
       dynamicToolsFingerprint: codexDynamicToolsFingerprint(toolBridge.specs),
       historyMessages,
+      forceProject: nativeToolSurfaceEnabled === false,
     })
   ) {
     const projection = projectContextEngineAssemblyForCodex({
@@ -2366,7 +2327,6 @@ export async function runCodexAppServerAttempt(
           cwd: effectiveWorkspace,
           appServer: pluginAppServer,
           promptText: codexTurnPromptText,
-          sandboxPolicy: codexSandboxPolicy,
           heartbeatCollaborationInstructions:
             workspaceBootstrapContext.heartbeatCollaborationInstructions,
         }),
@@ -3456,13 +3416,12 @@ function shouldEnableCodexAppServerNativeToolSurface(
 function canCodexAppServerNativeToolSurfaceHonorSandbox(
   sandbox: OpenClawSandboxContext | undefined,
 ): boolean {
-  if (!sandbox?.enabled || sandbox.backendId !== "docker") {
-    return true;
-  }
-  return (
-    !hasSandboxBindContainerPathAliases(sandbox.docker.binds) &&
-    !hasSandboxBindReadonlyHostShadows(sandbox.docker.binds)
-  );
+  // Codex app-server native shell, filesystem, and user MCP execution are owned
+  // by the app-server process. Until Codex native execution can target an
+  // OpenClaw sandbox backend directly, active OpenClaw sandboxing must disable
+  // the native surface and route shell access through sandbox-backed dynamic
+  // tools instead.
+  return !sandbox?.enabled;
 }
 
 function disableCodexPluginThreadConfig(pluginConfig?: unknown): CodexPluginConfig {
@@ -3498,7 +3457,7 @@ function addSandboxShellDynamicToolsIfAvailable(
     ...execTool,
     name: "sandbox_exec",
     description:
-      "Run a shell command through OpenClaw's configured sandbox backend for this session. Use only when the command must execute in the OpenClaw sandbox backend, such as an SSH-backed sandbox or Docker container-path bind layout that Codex's native shell cannot represent. Use Codex's native shell for normal local workspace commands.",
+      "Run a shell command through OpenClaw's configured sandbox backend for this session. Use when OpenClaw sandboxing is active or when a command must execute in the sandbox backend, such as an SSH-backed sandbox or Docker container-path bind layout. Use Codex's native shell only when no OpenClaw sandbox is active and native Code Mode is available.",
     execute: async (toolCallId, args, signal, onUpdate) => {
       const result = await execTool.execute(toolCallId, args, signal, onUpdate);
       return {
@@ -3520,14 +3479,14 @@ function addSandboxShellDynamicToolsIfAvailable(
     ...processTool,
     name: "sandbox_process",
     description:
-      "Manage sandbox_exec sessions that were started through OpenClaw's configured sandbox backend for this session: list, poll, log, write, send-keys, submit, paste, kill, clear, or remove. Use only for sandbox_exec follow-up; use Codex's native shell session handling for normal native shell commands.",
+      "Manage sandbox_exec sessions that were started through OpenClaw's configured sandbox backend for this session: list, poll, log, write, send-keys, submit, paste, kill, clear, or remove. Use only for sandbox_exec follow-up; use Codex's native shell session handling only when no OpenClaw sandbox is active and native Code Mode is available.",
   };
   return [...filteredTools, sandboxExecTool, sandboxProcessTool];
 }
 
 function shouldExposeSandboxExecDynamicTool(input: DynamicToolBuildParams): boolean {
   const backendId = input.sandbox?.enabled ? input.sandbox.backendId.trim().toLowerCase() : "";
-  return Boolean(backendId && (backendId !== "docker" || input.nativeToolSurfaceEnabled === false));
+  return Boolean(backendId && input.nativeToolSurfaceEnabled === false);
 }
 
 function isSandboxShellDynamicToolExcluded(config: CodexPluginConfig): boolean {
@@ -3582,9 +3541,13 @@ function shouldProjectMirroredHistoryForCodexStart(params: {
   startupBinding: CodexAppServerThreadBinding | undefined;
   dynamicToolsFingerprint: string;
   historyMessages: AgentMessage[];
+  forceProject?: boolean;
 }): boolean {
   if (!params.historyMessages.some((message) => message.role === "user")) {
     return false;
+  }
+  if (params.forceProject) {
+    return true;
   }
   if (!params.startupBinding?.threadId) {
     return true;
@@ -4866,9 +4829,9 @@ export const testing = {
   resolveDynamicToolCallTimeoutMs,
   resolveCodexDynamicToolsLoading,
   rotateOversizedCodexAppServerStartupBinding,
-  resolveCodexAppServerSandboxPolicyForOpenClawSandbox,
   resolveCodexAppServerForOpenClawToolPolicy,
   resolveOpenClawCodingToolsSessionKeys,
+  shouldProjectMirroredHistoryForCodexStart,
   shouldEnableCodexAppServerNativeToolSurface,
   shouldForceMessageTool,
   buildCodexPluginThreadConfigEligibilityLogData,
