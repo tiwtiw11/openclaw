@@ -1070,7 +1070,7 @@ export async function runCodexAppServerAttempt(
   if (activeContextEngine) {
     try {
       await applyActiveContextEngineProjection(
-        nativeToolSurfaceEnabled === false ? undefined : startupBinding,
+        !nativeToolSurfaceEnabled ? undefined : startupBinding,
       );
     } catch (assembleErr) {
       embeddedAgentLog.warn("context engine assemble failed; using Codex baseline prompt", {
@@ -1082,7 +1082,7 @@ export async function runCodexAppServerAttempt(
       startupBinding,
       dynamicToolsFingerprint: codexDynamicToolsFingerprint(toolBridge.specs),
       historyMessages,
-      forceProject: nativeToolSurfaceEnabled === false,
+      forceProject: !nativeToolSurfaceEnabled,
     })
   ) {
     const projection = projectContextEngineAssemblyForCodex({
