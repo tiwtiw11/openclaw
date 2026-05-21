@@ -6,6 +6,7 @@ Docs: https://docs.openclaw.ai
 
 ### Changes
 
+- Release/security: ship the npm package with a generated shrinkwrap and require review for lockfile/shrinkwrap changes so published OpenClaw installs use a locked dependency graph.
 - Tests/perf: isolate doctor core health check unit coverage from real skills/workspace discovery so `doctor-core-checks` no longer dominates unit perf while keeping one real skills-readiness smoke. (#84493) Thanks @frankekn.
 
 ### Fixes
