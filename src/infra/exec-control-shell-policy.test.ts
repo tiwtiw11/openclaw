@@ -12,6 +12,11 @@ describe("exec control shell policy", () => {
   it.each([
     "openclaw channels login --channel whatsapp",
     "openclaw channel login --channel whatsapp",
+    "openclaw channels --profile rescue login --channel whatsapp",
+    "openclaw channels --dev login --channel whatsapp",
+    "npm exec -- openclaw channels login --channel whatsapp",
+    "pnpm exec -- openclaw channels login --channel whatsapp",
+    "yarn exec -- openclaw channels login --channel whatsapp",
     "sudo -u openclaw bash -lc 'openclaw channels login --channel whatsapp'",
     "env -S 'openclaw channels' login --channel whatsapp",
   ])("denies interactive channel login commands: %s", async (command) => {
@@ -20,6 +25,18 @@ describe("exec control shell policy", () => {
       message: expect.stringContaining(
         "exec cannot run interactive OpenClaw channel login commands",
       ),
+    });
+  });
+
+  it.each([
+    "/approve req-1 allow-once",
+    "bash -lc '/approve req-1 deny'",
+    "sudo /approve req-1 deny",
+    "env -S '/approve req-1 allow-always'",
+  ])("denies approval commands through exec: %s", async (command) => {
+    await expect(inspect(command)).resolves.toMatchObject({
+      kind: "deny",
+      message: expect.stringContaining("exec cannot run /approve commands"),
     });
   });
 

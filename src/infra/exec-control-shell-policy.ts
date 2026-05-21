@@ -2,6 +2,7 @@ import { splitShellArgs } from "../utils/shell-argv.js";
 import { buildCommandPayloadCandidates } from "./command-analysis/risks.js";
 import { explainShellCommand } from "./command-explainer/extract.js";
 import type { CommandContext } from "./command-explainer/types.js";
+import { parseExecApprovalCommandText } from "./exec-approval-reply.js";
 
 export type ControlShellPolicyDecision =
   | { kind: "allow" }
@@ -26,6 +27,9 @@ const INTERACTIVE_CHANNEL_LOGIN_DENY_MESSAGE = [
   "Run `openclaw channels login` in a terminal on the gateway host, or use the channel-specific login agent tool when available (for WhatsApp: `whatsapp_login`).",
 ].join(" ");
 
+const EXEC_APPROVAL_COMMAND_DENY_MESSAGE =
+  "exec cannot run /approve commands. Use the approval UI, native approval buttons, or chat approval route instead.";
+
 const SECURITY_AUDIT_SUPPRESSION_WARNING =
   "Warning: security audit suppression changes require explicit approval unless exec is running in yolo mode.";
 
@@ -35,6 +39,17 @@ const OPENCLAW_GLOBAL_FLAGS_WITHOUT_VALUES = new Set(["--dev", "--no-color"]);
 
 const READ_ONLY_CONFIG_SUBCOMMANDS = new Set(["get", "schema", "validate"]);
 const MUTATING_CONFIG_SUBCOMMANDS = new Set(["set", "unset", "patch", "apply"]);
+
+type ControlShellPolicyContext = {
+  command: string;
+  candidates: readonly ControlShellCandidate[];
+};
+
+type ControlShellPolicy = {
+  name: string;
+  decision: Exclude<ControlShellPolicyDecision, { kind: "allow" }>;
+  matches: (context: ControlShellPolicyContext) => boolean;
+};
 
 function normalizeCommandBaseName(token: string | undefined): string {
   if (!token) {
@@ -58,9 +73,9 @@ function stripOpenClawPackageRunner(argv: string[]): string[] {
   if (
     (commandName === "pnpm" || commandName === "npm" || commandName === "yarn") &&
     (argv[1] === "exec" || argv[1] === "dlx" || argv[1] === "run") &&
-    normalizeCommandBaseName(argv[2]) === "openclaw"
+    normalizeCommandBaseName(argv[argv[2] === "--" ? 3 : 2]) === "openclaw"
   ) {
-    return argv.slice(2);
+    return argv.slice(argv[2] === "--" ? 3 : 2);
   }
   if (commandName === "bun" && normalizeCommandBaseName(argv[1]) === "openclaw") {
     return argv.slice(1);
@@ -88,14 +103,10 @@ function stripOpenClawPackageRunner(argv: string[]): string[] {
   return argv;
 }
 
-function stripOpenClawGlobalOptions(argv: string[]): string[] | null {
-  const openclawArgv = stripOpenClawPackageRunner(argv);
-  if (normalizeCommandBaseName(openclawArgv[0]) !== "openclaw") {
-    return null;
-  }
-  let index = 1;
-  while (index < openclawArgv.length) {
-    const arg = openclawArgv[index] ?? "";
+function stripOpenClawOptions(args: string[]): string[] {
+  let index = 0;
+  while (index < args.length) {
+    const arg = args[index] ?? "";
     if (OPENCLAW_GLOBAL_FLAGS_WITHOUT_VALUES.has(arg)) {
       index += 1;
       continue;
@@ -110,7 +121,15 @@ function stripOpenClawGlobalOptions(argv: string[]): string[] | null {
     }
     break;
   }
-  return openclawArgv.slice(index);
+  return args.slice(index);
+}
+
+function stripOpenClawGlobalOptions(argv: string[]): string[] | null {
+  const openclawArgv = stripOpenClawPackageRunner(argv);
+  if (normalizeCommandBaseName(openclawArgv[0]) !== "openclaw") {
+    return null;
+  }
+  return stripOpenClawOptions(openclawArgv.slice(1));
 }
 
 export function parseOpenClawChannelsLoginShellCommand(raw: string): boolean {
@@ -120,10 +139,22 @@ export function parseOpenClawChannelsLoginShellCommand(raw: string): boolean {
 
 function isInteractiveOpenClawChannelLoginArgv(argv: string[]): boolean {
   const openclawArgs = stripOpenClawGlobalOptions(argv);
+  const channelArgs = openclawArgs
+    ? openclawArgs[0] === "channels" || openclawArgs[0] === "channel"
+      ? stripOpenClawOptions(openclawArgs.slice(1))
+      : []
+    : [];
   return (
     openclawArgs !== null &&
     (openclawArgs[0] === "channels" || openclawArgs[0] === "channel") &&
-    openclawArgs[1] === "login"
+    channelArgs[0] === "login"
+  );
+}
+
+function isExecApprovalCommandCandidate(candidate: ControlShellCandidate): boolean {
+  return (
+    parseExecApprovalCommandText(candidate.raw) !== null ||
+    parseExecApprovalCommandText(candidate.argv.join(" ")) !== null
   );
 }
 
@@ -200,6 +231,25 @@ function requiresSecurityAuditSuppressionApproval(params: {
   }
   return true;
 }
+
+const CONTROL_SHELL_POLICIES: readonly ControlShellPolicy[] = [
+  {
+    name: "interactive-channel-login",
+    decision: { kind: "deny", message: INTERACTIVE_CHANNEL_LOGIN_DENY_MESSAGE },
+    matches: ({ candidates }) =>
+      candidates.some((candidate) => isInteractiveOpenClawChannelLoginArgv(candidate.argv)),
+  },
+  {
+    name: "exec-approval-command",
+    decision: { kind: "deny", message: EXEC_APPROVAL_COMMAND_DENY_MESSAGE },
+    matches: ({ candidates }) => candidates.some(isExecApprovalCommandCandidate),
+  },
+  {
+    name: "security-audit-suppression-mutation",
+    decision: { kind: "requires-approval", warning: SECURITY_AUDIT_SUPPRESSION_WARNING },
+    matches: requiresSecurityAuditSuppressionApproval,
+  },
+];
 
 function appendCandidate(
   candidates: ControlShellCandidate[],
@@ -307,17 +357,10 @@ export async function inspectControlShellCommand(params: {
     parsedSegments: params.parsedSegments,
   });
 
-  if (candidates.some((candidate) => isInteractiveOpenClawChannelLoginArgv(candidate.argv))) {
-    return { kind: "deny", message: INTERACTIVE_CHANNEL_LOGIN_DENY_MESSAGE };
-  }
-
-  if (
-    requiresSecurityAuditSuppressionApproval({
-      command,
-      candidates,
-    })
-  ) {
-    return { kind: "requires-approval", warning: SECURITY_AUDIT_SUPPRESSION_WARNING };
+  for (const policy of CONTROL_SHELL_POLICIES) {
+    if (policy.matches({ command, candidates })) {
+      return policy.decision;
+    }
   }
 
   return { kind: "allow" };

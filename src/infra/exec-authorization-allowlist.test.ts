@@ -138,6 +138,40 @@ describe("candidate-based exec allowlist", () => {
     );
   });
 
+  it("allows PowerShell file scripts through the script allowlist matcher", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const dir = makeTempDir();
+    makeExecutable(dir, "pwsh");
+    const script = path.join(dir, "trusted.ps1");
+    fs.writeFileSync(script, "Write-Output ok\n");
+    const env = makePathEnv(dir);
+    const analysis = analyzeArgvCommand({
+      argv: ["pwsh", "-File", script],
+      cwd: dir,
+      env,
+    });
+
+    const result = await evaluateExecAllowlist({
+      analysis,
+      allowlist: [{ pattern: script }],
+      safeBins: new Set(),
+      cwd: dir,
+      env,
+      platform: process.platform,
+    });
+
+    expect(result.allowlistSatisfied).toBe(true);
+    expect(result.segmentSatisfiedBy).toEqual(["allowlist"]);
+    expect(result.authorizationPlan).toEqual(
+      expect.objectContaining({
+        ok: false,
+        dialect: "powershell",
+      }),
+    );
+  });
+
   it("does not satisfy argv shell-wrapper line continuations through inner allowlists", async () => {
     if (process.platform === "win32") {
       return;
@@ -443,7 +477,7 @@ describe("candidate-based exec allowlist", () => {
     expect(both.segments.map((segment) => segment.argv)).toEqual([["git", "status"], ["id"]]);
   });
 
-  it("allows skill preludes inside shell wrappers when they reach a trusted wrapper", async () => {
+  it("rejects skill preludes inside shell wrappers even when they reach a trusted wrapper", async () => {
     if (process.platform === "win32") {
       return;
     }
@@ -472,11 +506,11 @@ describe("candidate-based exec allowlist", () => {
     });
 
     expect(result.analysisOk).toBe(true);
-    expect(result.allowlistSatisfied).toBe(true);
-    expect(result.segmentSatisfiedBy).toEqual(["skillPrelude", "skillPrelude", "skills"]);
+    expect(result.allowlistSatisfied).toBe(false);
+    expect(result.segmentSatisfiedBy).toEqual([null]);
   });
 
-  it("keeps positional carriers tied to the carried executable allowlist exception", async () => {
+  it("rejects blocked positional carriers even when the carrier is allowlisted", async () => {
     if (process.platform === "win32") {
       return;
     }
@@ -495,7 +529,7 @@ describe("candidate-based exec allowlist", () => {
     });
 
     expect(result.analysisOk).toBe(true);
-    expect(result.allowlistSatisfied).toBe(true);
+    expect(result.allowlistSatisfied).toBe(false);
     expect(result.segments.map((segment) => segment.argv)).toEqual([
       ["sh", "-c", '$0 "$@"', "xargs", "echo", "SAFE"],
     ]);

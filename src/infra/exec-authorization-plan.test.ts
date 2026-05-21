@@ -73,6 +73,24 @@ describe("exec authorization planner", () => {
     );
   });
 
+  it.each([
+    { command: "echo $(whoami)", reason: "command-substitution" },
+    { command: "echo `whoami`", reason: "command-substitution" },
+    { command: "cat <(echo ok)", reason: "process-substitution" },
+    { command: "echo $HOME", reason: "dynamic-argument" },
+    { command: "sleep 10 & echo done", reason: "background" },
+  ])("treats $reason as unanalyzable shell topology", async ({ command, reason }) => {
+    const plan = await planShellAuthorization({ command });
+
+    expect(plan).toEqual(
+      expect.objectContaining({
+        ok: false,
+        dialect: "posix-shell",
+        reason,
+      }),
+    );
+  });
+
   it("keeps eval as prompt-only", async () => {
     const plan = await planShellAuthorization({ command: 'eval "$OPENCLAW_CMD"' });
 

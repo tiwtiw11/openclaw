@@ -32,6 +32,7 @@ import {
   canUseReusableWrapperPayloadCandidates,
   planExecAuthorization,
   planShellAuthorization,
+  POSITIONAL_CARRIER_BLOCKED_EXECUTABLES,
   type ExecAuthorizationCandidate,
   type ExecAuthorizationPlan,
 } from "./exec-authorization-plan.js";
@@ -908,6 +909,23 @@ export async function evaluateExecAllowlist(
         authorizationPlan: plan,
       };
     }
+    const canUsePowerShellScriptAllowlist =
+      plan.dialect === "powershell" &&
+      !params.analysis.chains &&
+      params.analysis.segments.every(
+        (segment) => resolvePowerShellFileScriptArgv({ segment, cwd: params.cwd }) !== null,
+      );
+    if (canUsePowerShellScriptAllowlist) {
+      const result = evaluateSegments(params.analysis.segments, allowlistContext);
+      return {
+        allowlistSatisfied: result.satisfied,
+        allowlistMatches: result.matches,
+        segmentAllowlistEntries: result.segmentAllowlistEntries,
+        segmentSatisfiedBy: result.segmentSatisfiedBy,
+        segments: params.analysis.segments,
+        authorizationPlan: plan,
+      };
+    }
     return {
       allowlistSatisfied: false,
       allowlistMatches,
@@ -1106,7 +1124,11 @@ function resolveShellWrapperPositionalArgvCandidatePath(params: {
   }
 
   const carriedName = normalizeExecutableToken(carriedExecutable);
-  if (isDispatchWrapperExecutable(carriedName) || isShellWrapperExecutable(carriedName)) {
+  if (
+    isDispatchWrapperExecutable(carriedName) ||
+    isShellWrapperExecutable(carriedName) ||
+    POSITIONAL_CARRIER_BLOCKED_EXECUTABLES.has(carriedName)
+  ) {
     return undefined;
   }
 
@@ -1233,13 +1255,13 @@ function collectAllowAlwaysPatterns(params: {
   if (!candidatePath) {
     return;
   }
-  if (isInterpreterLikeAllowlistPattern(candidatePath)) {
-    const effectiveArgv = segment.resolution?.effectiveArgv ?? segment.argv;
-    if (params.strictInlineEval !== true || detectInlineEvalArgv(effectiveArgv) !== null) {
-      return;
-    }
-  }
   if (!trustPlan.shellWrapperExecutable) {
+    if (isInterpreterLikeAllowlistPattern(candidatePath)) {
+      const effectiveArgv = segment.resolution?.effectiveArgv ?? segment.argv;
+      if (params.strictInlineEval !== true || detectInlineEvalArgv(effectiveArgv) !== null) {
+        return;
+      }
+    }
     const argPattern = buildArgPatternFromArgv(segment.argv, params.platform);
     addAllowAlwaysPattern(params.out, candidatePath, argPattern);
     return;
@@ -1292,10 +1314,7 @@ function collectAllowAlwaysPatterns(params: {
     env: params.env,
     platform: params.platform,
   });
-  if (!nested.ok) {
-    return;
-  }
-  if (!canUseReusableWrapperPayloadCandidates(nested.segments)) {
+  if (!nested.ok || !canUseReusableWrapperPayloadCandidates(nested.segments)) {
     return;
   }
   for (const nestedSegment of nested.segments) {
@@ -1314,7 +1333,8 @@ function collectAllowAlwaysPatterns(params: {
 /**
  * Derive persisted allowlist patterns for an "allow always" decision.
  * When a command is wrapped in a shell (for example `zsh -lc "<cmd>"`),
- * persist the inner executable(s) rather than the shell binary.
+ * persist POSIX inner executables only from the authorization plan. Segment-only
+ * fallback stays for direct/script paths and Windows legacy parsing.
  */
 export function resolveAllowAlwaysPatternEntries(params: {
   segments: ExecCommandSegment[];
@@ -1340,12 +1360,7 @@ export function resolveAllowAlwaysPatternEntries(params: {
         out: patterns,
       });
     }
-    const needsLegacyCarrierFallback = params.authorizationPlan.risks.some(
-      (risk) => risk.kind === "shell-wrapper-through-carrier" || risk.kind === "command-carrier",
-    );
-    if (patterns.length > 0 || !needsLegacyCarrierFallback) {
-      return patterns;
-    }
+    return patterns;
   }
   for (const segment of params.segments) {
     collectAllowAlwaysPatterns({

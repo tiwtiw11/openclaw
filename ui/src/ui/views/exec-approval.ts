@@ -127,7 +127,7 @@ export function renderExecApprovalPrompt(state: AppViewState) {
   const titleId = "exec-approval-title";
   const descriptionId = "exec-approval-description";
   const handleCancel = () => {
-    if (!state.execApprovalBusy) {
+    if (!state.execApprovalBusy && allowedDecisions.includes("deny")) {
       void state.handleExecApprovalDecision("deny");
     }
   };

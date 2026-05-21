@@ -201,6 +201,26 @@ describe("approval and confirmation modals", () => {
     expect(handleExecApprovalDecision).toHaveBeenCalledWith("deny");
   });
 
+  it("does not submit deny from Escape when deny is unavailable", async () => {
+    const request = createExecRequest();
+    request.request.allowedDecisions = ["allow-once"];
+    const handleExecApprovalDecision = vi.fn(async () => undefined);
+    render(
+      renderExecApprovalPrompt(
+        createExecState({
+          execApprovalQueue: [request],
+          handleExecApprovalDecision,
+        }),
+      ),
+      container,
+    );
+
+    const { dialog } = await getRenderedDialog();
+    dispatchEscape(dialog);
+
+    expect(handleExecApprovalDecision).not.toHaveBeenCalled();
+  });
+
   it("does not dispatch an extra exec decision from Escape while busy", async () => {
     const handleExecApprovalDecision = vi.fn(async () => undefined);
     render(
